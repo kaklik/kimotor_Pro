@@ -788,6 +788,9 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
         self.lset = self.udpate_lset(self.n_layers)
         self.n_loops  = int(self.m_ctrlLoops.GetValue())
         self.n_slots  = int(self.m_ctrlSlots.GetValue())
+        # Angular width of one coil [deg]; 0 = full slot pitch. A smaller span
+        # leaves a free gap between neighbouring coils (e.g. for Hall sensors).
+        self.coil_span_deg = float(self.m_ctrlCoilSpan.GetValue()) if hasattr(self, "m_ctrlCoilSpan") else 0.0
         self.winding_mode = self.m_cbWindingMode.GetStringSelection() if hasattr(self, "m_cbWindingMode") else "PCB"
         self.copper_weight = self.m_cbCopperWeight.GetStringSelection() if hasattr(self, "m_cbCopperWeight") else "1 oz / 35um"
         self.copper_thickness_m = self.COPPER_WEIGHT_TO_THICKNESS_M.get(self.copper_weight, self.tthick)
@@ -869,6 +872,13 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
 
         if self.group:
             self.btn_clear.Enable(True)
+
+    def coil_angle(self, n_slots=None):
+        """Angular width of one coil [rad]: the slot pitch, or the user coil span if smaller."""
+        n_slots = n_slots if n_slots else self.n_slots
+        th0 = 2 * math.pi / max(n_slots, 1)
+        span = math.radians(getattr(self, "coil_span_deg", 0.0) or 0.0)
+        return th0 if span <= 0 else min(th0, span)
 
     def _effective_winding_layers(self):
         return max(int(getattr(self, "n_layers", 1)), 1)
@@ -1173,8 +1183,8 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
             return 0.0
 
         slot_pitch_e = 2.0 * math.pi * self.magnet_pole_pairs / max(self.n_slots, 1)
-        coil_pitch_slots = max(self.n_loops, 1)
-        coil_pitch_e = coil_pitch_slots * slot_pitch_e
+        # Concentrated (tooth) coils: each coil spans its own angular width.
+        coil_pitch_e = self.coil_angle() * self.magnet_pole_pairs
 
         kd_num = math.sin(q * slot_pitch_e / 2.0)
         kd_den = max(q * math.sin(slot_pitch_e / 2.0), 1e-9)
@@ -1232,7 +1242,7 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
     def get_effective_coil_strategy(self, ri, ro, n_slots, n_loops):
         radial_available = max(ro - ri, 0.0)
         radial_required = max(n_loops * self.dr + self.trk_w, self.dr)
-        slot_pitch = (2.0 * math.pi) / max(n_slots, 1)
+        slot_pitch = self.coil_angle(n_slots)
         mean_radius = max(0.5 * (ri + ro), 1.0)
         tangential_span = max(mean_radius * slot_pitch, 1.0)
         aspect = float(radial_available) / float(tangential_span)
@@ -1593,7 +1603,7 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
 
             radial_available = self.r_coil_out - self.r_coil_in
             radial_required = self.n_loops * self.dr + self.trk_w
-            inner_half_width = self.r_coil_in * math.sin(math.pi / self.n_slots)
+            inner_half_width = self.r_coil_in * math.sin(self.coil_angle() / 2.0)
             angular_required = self.n_loops * self.dr + (self.trk_w / 2)
 
             error_msg = ""
@@ -1831,20 +1841,21 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
         return [actual_start, actual_end]
 
     def do_coils(self, ri, ro, n_slots, n_loops=1, lset=None, mode=0):
-        th0 = 2*math.pi/n_slots
+        th0 = 2*math.pi/n_slots          # slot pitch (coil placement)
+        th_coil = self.coil_angle(n_slots)  # coil shape width (<= th0)
         effective_mode, effective_name = self.get_effective_coil_strategy(ri, ro, n_slots, n_loops)
         self.active_coil_style_name = effective_name
         if effective_mode == 0:
-            pcu0, pcu0m, pcu0mi = ksolve.parallel( ri, ro, self.dr, th0, n_loops, 0 )
-            pcu1, pcu1m, pcu1mi = ksolve.parallel( ri, ro, self.dr, th0, n_loops, 1 )
+            pcu0, pcu0m, pcu0mi = ksolve.parallel( ri, ro, self.dr, th_coil, n_loops, 0 )
+            pcu1, pcu1m, pcu1mi = ksolve.parallel( ri, ro, self.dr, th_coil, n_loops, 1 )
         elif effective_mode == 2:
             # Keep Compact stable on the radial point-layout until the dedicated
             # compact solver path is fully validated against all tracker/routing cases.
-            pcu0 = ksolve.radial( ri, ro, self.dr, th0, n_loops, 0 )
-            pcu1 = ksolve.radial( ri, ro, self.dr, th0, n_loops, 1 )
+            pcu0 = ksolve.radial( ri, ro, self.dr, th_coil, n_loops, 0 )
+            pcu1 = ksolve.radial( ri, ro, self.dr, th_coil, n_loops, 1 )
         else:
-            pcu0 = ksolve.radial( ri, ro, self.dr, th0, n_loops, 0 )
-            pcu1 = ksolve.radial( ri, ro, self.dr, th0, n_loops, 1 )
+            pcu0 = ksolve.radial( ri, ro, self.dr, th_coil, n_loops, 0 )
+            pcu1 = ksolve.radial( ri, ro, self.dr, th_coil, n_loops, 1 )
         pcu0 = np.asarray(pcu0, dtype=float)
         pcu1 = np.asarray(pcu1, dtype=float)
         
@@ -1865,7 +1876,7 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
             Tcw = np.matmul(pcu0, R.transpose())
             Tccw = np.matmul(pcu1, R.transpose())
             slot_anchors = self.build_slot_anchors(Tcw, Tccw, th)
-            slot_center_via = self.build_slot_center_via(Tcw, Tccw, th, th0)
+            slot_center_via = self.build_slot_center_via(Tcw, Tccw, th, th_coil)
 
             for idx, layer in enumerate(lset):
                 is_first = (idx == 0)
