@@ -328,6 +328,21 @@ class KMotorProGUI ( wx.Frame ):
 
 		sbElecMotor.Add( bSizer21, 0, wx.EXPAND, 5 )
 
+		bSizerSpan = wx.BoxSizer( wx.HORIZONTAL )
+
+		self.lbl_coilSpan = wx.StaticText( sbSizer1.GetStaticBox(), wx.ID_ANY, u"Coil span [deg]:", wx.DefaultPosition, wx.DefaultSize, 0, u"lbl_coilSpan" )
+		self.lbl_coilSpan.Wrap( -1 )
+		self.lbl_coilSpan.SetToolTip( u"Angular width of one coil. 0 = full slot pitch (360/slots). A smaller value leaves a free gap between neighbouring coils, e.g. for Hall sensors." )
+		bSizerSpan.Add( self.lbl_coilSpan, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5 )
+
+		bSizerSpan.Add( ( 0, 0), 1, wx.EXPAND, 5 )
+
+		self.m_ctrlCoilSpan = SpinCtrlDoublePersist( sbSizer1.GetStaticBox(), wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, wx.ALIGN_CENTER_HORIZONTAL|wx.ALIGN_LEFT|wx.SP_ARROW_KEYS, 0, 360, 0.000000, 0.5, u"m_ctrlCoilSpan" )
+		self.m_ctrlCoilSpan.SetDigits( 2 )
+		bSizerSpan.Add( self.m_ctrlCoilSpan, 1, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.EXPAND, 5 )
+
+		sbElecMotor.Add( bSizerSpan, 0, wx.EXPAND, 5 )
+
 		bSizer214 = wx.BoxSizer( wx.HORIZONTAL )
 
 		self.lbl_refresh_time14 = wx.StaticText( sbSizer1.GetStaticBox(), wx.ID_ANY, u"Coil style:", wx.DefaultPosition, wx.DefaultSize, 0, u"lbl_refresh_time14" )

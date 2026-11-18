@@ -62,6 +62,11 @@ def parallel(r1,r2, dr,th,turns,dir):
 def radial(ri,ro, dr,th,turns,dir):
         """ Compute layout points for coil with sides aligned to the local radial direction
 
+        Every side is a radial line. The step from one turn to the next is made on the
+        inner arc (the descending side stays on its own radial line), so neighbouring
+        tracks keep at least ``dr`` centre distance everywhere, also for fine pitches.
+        Arc mid points are taken at the true angular middle of each arc.
+
         Args:
             ri (int): coil inner radius
             ro (int): coil outer radius
@@ -71,123 +76,43 @@ def radial(ri,ro, dr,th,turns,dir):
             dir (int): coil direction, from larger to smaller loop (0:CW normal, 1:CCW rverse)
 
         Returns:
-            matrix, matrix, matrix: corners (excl. arc mids), outer-arc mid points, inner-arc mid points
+            matrix: corners and arc mid points in the order expected by coil_tracker()
         """
- 
-        pts = []
-
-        # center
-        c = [0,0,0]
-        
-        # rotation of first arc and last ard mid-mid-points
-        Rcw = np.array([
-            [math.cos(th/4), -math.sin(th/4)],
-            [math.sin(th/4), math.cos(th/4)],
-        ])
-
-        # first line
-        l0 = np.array([ c, [ri*math.cos(th/2), ri*math.sin(th/2), 0] ])
-
-
-        for turn in range(turns):
-            
-            # solve corner points
-            
-            lr = kla.line_offset(l0, -dr)
-            pc1 = kla.circle_line_intersect(lr, c, ri+turn*dr)
-            pc1 = pc1[0:2]
-
-            lr = [c, [pc1[0], pc1[1], 0]]
-            pc2 = kla.circle_line_intersect(lr, c, ro-turn*dr)
-            pc2 = pc2[0:2]
-            pc3 = np.array([ pc2[0],-pc2[1] ])
-            pc4 = np.array([ pc1[0],-pc1[1] ])
-            
-            # solve outer/inner mid-points
-            pmo = np.array([ ro-turn*dr, 0 ])
-            pmi = np.array([ ri+turn*dr, 0 ])
-
-            # order points
-            if dir == 0:
-                if turn == 0:
-                    tp = np.matmul(Rcw, pmi)
-                    pts.extend([pmi, tp[0:2], pc1, pc2, pmo, pc3])
-                elif turn == turns-1:
-                    tp = np.matmul(Rcw, pmo)
-                    pts.extend([pc4, pmi, pc1, pc2, tp[0:2], pmo])
-                else:
-                    pts.extend([pc4, pmi, pc1, pc2, pmo, pc3])
-            else:
-                if turn == 0:
-                    tp = np.matmul(Rcw, pmi)
-                    pts.extend([pmi, tp[0:2], pc4, pc3, pmo, pc2])
-                elif turn == turns-1:
-                    tp = np.matmul(Rcw, pmo)
-                    pts.extend([pc1, pmi, pc4, pc3, tp[0:2], pmo])
-                else:
-                    pts.extend([pc1, pmi, pc4, pc3, pmo, pc2])
-            
-            # move to the next radial
-            l0 = [ [pc1[0], pc1[1], 0], [pc2[0], pc2[1], 0] ] 
-
-        mpt = np.matrix(pts)
-
-        return mpt
-
-def compact(ri, ro, dr, th, turns, dir):
-        """Compute a denser radial-style coil with tighter bridge stubs.
-
-        This keeps the same point layout contract as ``radial()`` so the existing
-        tracker/routing code can use it unchanged, but reduces bridge rotation to
-        waste less angular space in narrow slots.
-        """
-
-        pts = []
         c = [0, 0, 0]
 
-        # Tighter than radial(): keep the first/last bridge closer to the slot
-        # centerline so dense / near-square slots use less dead angular width.
-        bridge_rot = th / 6.0
-        Rcw = np.array([
-            [math.cos(bridge_rot), -math.sin(bridge_rot)],
-            [math.sin(bridge_rot), math.cos(bridge_rot)],
-        ])
+        def rot(p, a):
+            return np.array([p[0] * math.cos(a) - p[1] * math.sin(a), p[0] * math.sin(a) + p[1] * math.cos(a)])
 
+        def polar(r, a):
+            return np.array([r * math.cos(a), r * math.sin(a)])
+
+        pts = []
         l0 = np.array([c, [ri * math.cos(th / 2), ri * math.sin(th / 2), 0]])
-
+        a_prev = None
         for turn in range(turns):
             lr = kla.line_offset(l0, -dr)
-            pc1 = kla.circle_line_intersect(lr, c, ri + turn * dr)
-            pc1 = pc1[0:2]
-
-            lr = [c, [pc1[0], pc1[1], 0]]
-            pc2 = kla.circle_line_intersect(lr, c, ro - turn * dr)
-            pc2 = pc2[0:2]
-            pc3 = np.array([pc2[0], -pc2[1]])
-            pc4 = np.array([pc1[0], -pc1[1]])
-
-            pmo = np.array([ro - turn * dr, 0])
-            pmi = np.array([ri + turn * dr, 0])
-
-            if dir == 0:
-                if turn == 0:
-                    tp = np.matmul(Rcw, pmi)
-                    pts.extend([pmi, tp[0:2], pc1, pc2, pmo, pc3])
-                elif turn == turns - 1:
-                    tp = np.matmul(Rcw, pmo)
-                    pts.extend([pc4, pmi, pc1, pc2, tp[0:2], pmo])
-                else:
-                    pts.extend([pc4, pmi, pc1, pc2, pmo, pc3])
+            pc1 = kla.circle_line_intersect(lr, c, ri + turn * dr)[0:2]
+            a1 = math.atan2(pc1[1], pc1[0])          # radial line of this turn
+            r_in, r_out = ri + turn * dr, ro - turn * dr
+            pc2 = polar(r_out, a1)
+            pc3 = polar(r_out, -a1)
+            # descending side of the previous turn ends on its own radial line
+            pc4 = polar(r_in, -(a_prev if a_prev is not None else a1))
+            pmo = np.array([r_out, 0.0])
+            pmi = np.array([r_in, 0.0])
+            if turn == 0:
+                pts.extend([pmi, rot(pmi, a1 / 2), pc1, pc2, pmo, pc3])
+            elif turn == turns - 1:
+                pts.extend([pc4, pmi, pc1, pc2, rot(pmo, a1 / 2), pmo])
             else:
-                if turn == 0:
-                    tp = np.matmul(Rcw, pmi)
-                    pts.extend([pmi, tp[0:2], pc4, pc3, pmo, pc2])
-                elif turn == turns - 1:
-                    tp = np.matmul(Rcw, pmo)
-                    pts.extend([pc1, pmi, pc4, pc3, tp[0:2], pmo])
-                else:
-                    pts.extend([pc1, pmi, pc4, pc3, pmo, pc2])
-
+                pts.extend([pc4, pmi, pc1, pc2, pmo, pc3])
+            a_prev = a1
             l0 = [[pc1[0], pc1[1], 0], [pc2[0], pc2[1], 0]]
 
+        if dir != 0:   # reverse direction = mirror image
+            pts = [np.array([q[0], -q[1]]) for q in pts]
         return np.matrix(pts)
+
+def compact(ri, ro, dr, th, turns, dir):
+        """Dense variant; shares the radial() layout (same point contract)."""
+        return radial(ri, ro, dr, th, turns, dir)
