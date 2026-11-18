@@ -714,6 +714,16 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
     def _add_grouped_silk_segment(self, group, start_xy, end_xy, width=None):
         return self._add_grouped_segment(group, start_xy, end_xy, pcbnew.F_SilkS, width if width is not None else max(1, 0.127 * self.SCALE))
 
+    def _add_grouped_track(self, group, p_start, p_end, layer, width):
+        t = pcbnew.PCB_TRACK(self.board)
+        t.SetStart(p_start); t.SetEnd(p_end); t.SetLayer(layer); t.SetWidth(int(width))
+        net_coil = self.board.FindNet("coil")
+        if net_coil:
+            t.SetNet(net_coil)
+        self.board.Add(t)
+        group.AddItem(t)
+        return t
+
     def _add_grouped_segment(self, group, start_xy, end_xy, layer, width):
         seg = pcbnew.PCB_SHAPE(self.board, pcbnew.SHAPE_T_SEGMENT)
         seg.SetStart(self._as_point(start_xy[0], start_xy[1]))
@@ -1866,6 +1876,26 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
         
         net_coil = self.board.FindNet("coil")
 
+        # Inter-layer via of a 2-layer coil: in the middle of the free hole, joined to the
+        # spiral ends (centre of the innermost outer arc) by a short radial stub.
+        # Placed only when it keeps trk_space to every turn, else the old position is used.
+        hole_via = None
+        if effective_mode != 0 and len(lset) == 2 and n_loops >= 2:
+            loc = np.asarray(pcu0, dtype=float)
+            r_end = float(np.hypot(loc[-1, 0], loc[-1, 1]))
+            r_v = 0.5 * (ri + ro)
+            need = self.d_via / 2.0 + self.trk_space + self.trk_w / 2.0
+            a_left = abs(math.atan2(loc[-4, 1], loc[-4, 0]))     # last ascending side
+            a_right = abs(math.atan2(loc[-6, 1], loc[-6, 0]))    # last descending side
+            r_low = ri + (n_loops - 1) * self.dr                  # innermost inner arc
+            if (r_v - r_low >= need and r_end - r_v >= self.d_via / 2.0
+                    and r_v * math.sin(a_left) >= need and r_v * math.sin(a_right) >= need):
+                hole_via = (r_end, r_v)
+
+        # Solder vias of the coil terminals sit below the coil (not on the corner, where
+        # they would touch the neighbouring turn); a radial stub joins them.
+        self.pin_drop = int(self.d_via / 2.0 + self.trk_space + self.trk_w / 2.0)
+
         for p in range(n_slots):
             pgroup = pcbnew.PCB_GROUP( self.board )
             pgroup.SetName("pole_"+str(p))
@@ -1876,7 +1906,30 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
             Tcw = np.matmul(pcu0, R.transpose())
             Tccw = np.matmul(pcu1, R.transpose())
             slot_anchors = self.build_slot_anchors(Tcw, Tccw, th)
-            slot_center_via = self.build_slot_center_via(Tcw, Tccw, th, th_coil)
+            if hole_via is not None:
+                r_end, r_v = hole_via
+                p_end = self._as_point(r_end * math.cos(th), r_end * math.sin(th))
+                slot_center_via = self._as_point(r_v * math.cos(th), r_v * math.sin(th))
+                for layer in lset:   # both spiral ends meet at p_end
+                    self._add_grouped_track(pgroup, p_end, slot_center_via, layer, self.trk_w)
+            else:
+                slot_center_via = self.build_slot_center_via(Tcw, Tccw, th, th_coil)
+            if len(lset) >= 2 and effective_mode != 0:
+                # The terminals are exactly the spiral starts of the first and the last
+                # layer (index 2: the inner bridge before it is removed on terminal layers).
+                # Picking "inner corners" by angle is ambiguous: the step point of turn 2
+                # lies on the same radial line as the terminal one dr further out.
+                last_arr = Tccw if (len(lset) - 1) % 2 else Tcw
+                terms = [(self._as_point(*self._point_xy(Tcw[2])), lset[0]),
+                         (self._as_point(*self._point_xy(last_arr[2])), lset[-1])]
+                terms.sort(key=lambda t: self._angle_diff(math.atan2(t[0].y, t[0].x), th))  # [left, right]
+                dropped = []
+                for a, layer in terms:
+                    ra = math.hypot(a.x, a.y); k = (ra - self.pin_drop) / ra
+                    q = self._as_point(a.x * k, a.y * k)
+                    self._add_grouped_track(pgroup, a, q, layer, self.trk_w)
+                    dropped.append(q)
+                slot_anchors = dropped
 
             for idx, layer in enumerate(lset):
                 is_first = (idx == 0)
@@ -2212,43 +2265,38 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
         support_min_dist = max(support_hole_width + self.trk_space, support_hole_width)
 
         def add_ring_path(layer, radius, th_start, th_end, p_start, p_end, width):
-            """Draw robust ring connection as segmented path (avoids arc edge-case disconnects)."""
+            """Draw a ring connection as true arcs (<= 90 deg each) on the circle `radius`.
+            End points are p_start / p_end exactly, so the chain stays connected."""
             d_th = th_end - th_start
             if d_th > math.pi:
                 d_th -= 2 * math.pi
             elif d_th < -math.pi:
                 d_th += 2 * math.pi
 
-            # Very small angle: direct short track.
-            if abs(d_th) < 1e-4:
-                t = pcbnew.PCB_TRACK(self.board)
+            def add(cls_arc, a, b, mid=None):
+                t = pcbnew.PCB_ARC(self.board) if cls_arc else pcbnew.PCB_TRACK(self.board)
                 t.SetLayer(layer)
                 t.SetWidth(width)
                 if net_coil:
                     t.SetNet(net_coil)
-                t.SetStart(p_start)
-                t.SetEnd(p_end)
+                t.SetStart(a)
+                if cls_arc:
+                    t.SetMid(mid)
+                t.SetEnd(b)
                 self.board.Add(t)
-                return
 
-            # 10 degree max step keeps geometry smooth and electrically contiguous.
-            step = math.pi / 18.0
-            nseg = max(2, int(abs(d_th) / step) + 1)
+            if abs(d_th) * radius < self.SCALE * 0.05:     # shorter than 50 um: plain track
+                add(False, p_start, p_end)
+                return
+            n = max(1, int(math.ceil(abs(d_th) / (math.pi / 2))))
             prev = p_start
-            for k in range(1, nseg + 1):
-                if k == nseg:
-                    nxt = p_end
-                else:
-                    th_k = th_start + d_th * (k / float(nseg))
-                    nxt = self.fpoint(int(radius * math.cos(th_k)), int(radius * math.sin(th_k)))
-                t = pcbnew.PCB_TRACK(self.board)
-                t.SetLayer(layer)
-                t.SetWidth(width)
-                if net_coil:
-                    t.SetNet(net_coil)
-                t.SetStart(prev)
-                t.SetEnd(nxt)
-                self.board.Add(t)
+            for k in range(1, n + 1):
+                a0 = th_start + d_th * (k - 1) / n
+                a1 = th_start + d_th * k / n
+                am = 0.5 * (a0 + a1)
+                mid = self.fpoint(int(round(radius * math.cos(am))), int(round(radius * math.sin(am))))
+                nxt = p_end if k == n else self.fpoint(int(round(radius * math.cos(a1))), int(round(radius * math.sin(a1))))
+                add(True, prev, nxt, mid)
                 prev = nxt
 
         # 1. PLATZIERUNG DER ISOLIERTEN STÜTZ-THT-LÖCHER AUSSERHALB DER SPULEN
@@ -2285,7 +2333,7 @@ class KMotorProDialog ( kmotor_pro_gui.KMotorProGUI ):
         # Give extra clearance to support TH holes near the first ring.
         if support_via_mode in (2, 4):
             first_ring_offset += int(0.5 * support_hole_width)
-        current_radius = self.r_coil_in - (self.d_via / 2.0) - self.ring_space - (self.ring_w / 2.0) - first_ring_offset
+        current_radius = self.r_coil_in - getattr(self, "pin_drop", 0) - (self.d_via / 2.0) - self.ring_space - (self.ring_w / 2.0) - first_ring_offset
         lowest_used_radius = current_radius
 
         # Mode 4: zusätzlich 2 innere unverbundene Stützlöcher je Slot (nahe Ringanschlüssen).
